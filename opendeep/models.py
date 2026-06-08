@@ -193,7 +193,161 @@ class ChatSession:
             print()
             
         return GenerateContentResponse(text=full_text)
+
+class AsyncChatSession:
+    """Represents an asynchronous multi-turn conversation with the model."""
+    def __init__(self, model, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
+        self.model = model
+        self.chat_session_id = None
+        self.parent_message_id = None
+        
+        if thinking_enabled is None:
+            self.thinking_enabled = self.model.model_name in ("deepseek-reasoner", "deepseek-v4-pro")
+        else:
+            self.thinking_enabled = thinking_enabled
+            
+        self.search_enabled = search_enabled if search_enabled is not None else False
+        
+        if self.search_enabled and self.model.model_name != "deepseek-v4-flash":
+            import warnings
+            warnings.warn("Search is only supported by the 'deepseek-v4-flash' (Instant) model.", UserWarning)
+
+    async def _init_session(self):
+        if not self.chat_session_id:
+            self.chat_session_id = await self.model._create_session()
+
+    async def send_message(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
+        await self._init_session()
+        
+        url = f"{config.base_url}/chat/completion"
+        payload = {
+            "chat_session_id": self.chat_session_id,
+            "parent_message_id": self.parent_message_id,
+            "prompt": prompt,
+            "ref_file_ids": [],
+            "thinking_enabled": self.thinking_enabled,
+            "search_enabled": self.search_enabled
+        }
+        
+        headers = self.model._get_headers()
+        
+        try:
+            from .pow import DeepSeekPOW
+            pow_solver = DeepSeekPOW()
+            
+            pow_resp = await self.model.session.post(
+                f"{config.base_url}/chat/create_pow_challenge",
+                headers=headers,
+                json={"target_path": "/api/v0/chat/completion"}
+            )
+            
+            if pow_resp.status_code == 200:
+                challenge_data = pow_resp.json().get('data', {}).get('biz_data', {}).get('challenge')
+                if challenge_data:
+                    headers['x-ds-pow-response'] = pow_solver.solve_challenge(challenge_data)
+        except ImportError as e:
+            import warnings
+            warnings.warn(f"POW solver dependencies missing (wasmtime, numpy). Request might be rejected. Error: {e}", ImportWarning)
+            
+        response = await self.model.session.post(url, headers=headers, json=payload, stream=True)
+        response.raise_for_status()
+            
+        if 'text/event-stream' not in response.headers.get('Content-Type', ''):
+            raise RuntimeError(f"Unexpected Content-Type received: {response.headers.get('Content-Type')}")
+        
+        full_text = ""
+        current_patch_target = "response/content"
+        
+        async for line in response.aiter_lines():
+            if line:
+                decoded_line = line.decode('utf-8') if isinstance(line, bytes) else line
+                    
+                if decoded_line.startswith("data: ") and decoded_line != "data: [DONE]":
+                    try:
+                        raw_data = decoded_line[6:].strip()
+                        if not raw_data:
+                            continue
+                            
+                        data = json.loads(raw_data)
+                        content = ""
+                        reasoning = ""
+                        
+                        if "response_message_id" in data:
+                            self.parent_message_id = data["response_message_id"]
+                        elif "v" in data and isinstance(data["v"], dict) and "response" in data["v"] and "message_id" in data["v"]["response"]:
+                            self.parent_message_id = data["v"]["response"]["message_id"]
+                        
+                        if "choices" in data:
+                            choices = data.get("choices", [])
+                            if choices:
+                                delta = choices[0].get("delta", {})
+                                content = delta.get("content", "")
+                                reasoning = delta.get("reasoning_content", "")
+                        elif "v" in data:
+                            if "p" in data:
+                                current_patch_target = data["p"]
+                                
+                            val = data["v"]
+                            if isinstance(val, str):
+                                if current_patch_target == "response/content":
+                                    content = val
+                                elif current_patch_target == "response/thinking_content":
+                                    reasoning = val
+                        
+                        if reasoning and stream:
+                            print(f"\033[90m{reasoning}\033[0m", end="", flush=True)
+                            
+                        if content:
+                            full_text += content
+                            if stream:
+                                print(content, end="", flush=True)
+                                
+                    except json.JSONDecodeError:
+                        continue
         if stream:
             print()
             
         return GenerateContentResponse(text=full_text)
+
+class AsyncGenerativeModel:
+    """
+    Asynchronous interface for interacting with generative models.
+    Supports 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-vision', 'deepseek-chat', and 'deepseek-reasoner'.
+    """
+    def __init__(self, model_name: str = "deepseek-v4-pro"):
+        self.model_name = model_name
+        if not HAS_CURL_CFFI:
+            raise ImportError("curl_cffi is required for AsyncGenerativeModel. pip install curl_cffi")
+        from curl_cffi.requests import AsyncSession
+        self.session = AsyncSession(impersonate="chrome120")
+        
+    def _get_headers(self) -> Dict[str, str]:
+        if not config.api_key:
+            raise ValueError("API key is not configured.")
+        return {
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": config.user_agent,
+            "Referer": "https://chat.deepseek.com/",
+            "x-app-version": "20241129.1",
+            "x-client-platform": "web"
+        }
+
+    async def _create_session(self) -> str:
+        url = f"{config.base_url}/chat_session/create"
+        payload = {"character_id": None}
+        response = await self.session.post(url, headers=self._get_headers(), json=payload)
+        response.raise_for_status()
+        
+        session_id = response.json().get("data", {}).get("biz_data", {}).get("id")
+        if not session_id:
+            raise RuntimeError("Failed to extract chat session ID.")
+        return session_id
+
+    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> AsyncChatSession:
+        return AsyncChatSession(self, thinking_enabled, search_enabled)
+
+    async def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> GenerateContentResponse:
+        chat = self.start_chat(thinking_enabled, search_enabled)
+        return await chat.send_message(prompt, stream=stream)
