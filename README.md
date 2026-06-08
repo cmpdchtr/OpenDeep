@@ -1,4 +1,4 @@
-# OpenDeep 🚀
+# OpenDeep 🐋
 
 **OpenDeep** is an elegant, free, and unofficial Python client for the DeepSeek API. It provides a clean, Google Gemini-like syntax while seamlessly handling DeepSeek's underlying security mechanisms (Cloudflare bypass, Proof of Work challenges, and Server-Sent Events). 
 
@@ -7,10 +7,11 @@ Whether you need quick text generation or complex reasoning from the DeepSeek V4
 ## ✨ Key Features
 
 - 💎 **Gemini-Like Syntax:** Familiar and highly readable API design (`model.generate_content`).
-- 🛡️ **Cloudflare Bypass:** Uses `curl_cffi` to impersonate browser TLS fingerprints, preventing blocking.
-- 🧩 **Native POW Solver:** WebAssembly-powered challenge solver to effortlessly bypass DeepSeek's rate-limiting/bot protection.
-- 📡 **Real-Time Streaming:** Full support for Server-Sent Events (SSE) parsing, including the newest DeepSeek patch formats.
-- 🧠 **Thinking Support (DeepSeek V4 Pro):** Seamlessly handles the "thinking" process of the advanced reasoning models.
+- 🔄 **Multi-Turn Chat History:** Seamlessly remember context with `ChatSession`.
+- ⚡ **Asynchronous Client:** Full async support for high-performance applications.
+- 🔍 **Web Search:** Native support for DeepSeek's web search capabilities (Instant model).
+- 🧠 **Thinking Support (DeepThink):** Captures and streams the reasoning process of advanced models (V4 Pro, Reasoner).
+- 🛡️ **Cloudflare & POW Bypass:** Uses `curl_cffi` and WebAssembly to automatically solve browser challenges.
 
 ## 📦 Installation
 
@@ -29,44 +30,66 @@ To use OpenDeep, you need your active session token from the browser:
 3. **Option A:** Go to Application (or Storage) -> Local Storage -> find the key named `userToken` and copy its value.
 4. **Option B:** Go to the Console tab and run: `JSON.parse(localStorage.getItem("userToken")).value`
 
-### 2. Basic Usage (Without Streaming)
-If you just want the final answer without any real-time console output or "thinking" logs, set `stream=False` (this is the default behavior).
-
+### 2. Basic Usage
 ```python
 import opendeep as genai
 
 genai.configure(api_key="your_userToken_here")
-model = genai.GenerativeModel("deepseek-v4-flash") # V4 Flash model
+model = genai.GenerativeModel("deepseek-v4-flash")
 
-# Waits for the full generation to complete
 response = model.generate_content("Explain the theory of relativity in simple terms.")
-
-print("Final Output:")
 print(response.text)
 ```
 
-### 3. Real-Time Streaming & Reasoner Output
-When using the `deepseek-v4-pro` model with `stream=True`, OpenDeep will stream the internal "thinking" process directly to your console in a subtle gray color, followed by the actual answer.
-
+### 3. Multi-Turn Chat (ChatSession)
+Maintain context across multiple messages.
 ```python
 import opendeep as genai
 
 genai.configure(api_key="your_userToken_here")
+model = genai.GenerativeModel("deepseek-v4-flash")
+chat = model.start_chat()
 
-# Select the reasoning model (V4 Pro)
-model = genai.GenerativeModel("deepseek-v4-pro")
+response = chat.send_message("My name is John.")
+print("Bot:", response.text)
 
-# stream=True enables real-time console output
-# It will print the reasoning process (in gray) and then the final answer!
-response = model.generate_content("How many R's are in the word strawberry?", stream=True)
-
-# The response object still captures the final text (excluding the thinking process)
-print(f"\nCaptured text length: {len(response.text)} characters")
+response = chat.send_message("What is my name?")
+print("Bot:", response.text)
 ```
 
-**💡 Note on Reasoner and Streams:**
-- If you use `deepseek-v4-pro` with `stream=True`, you will **see** the thoughts live in the console.
-- If you use `deepseek-v4-pro` with `stream=False`, the thoughts are **silently discarded** during processing, and you only get the final, clean answer in `response.text`.
+### 4. DeepThink & Web Search
+You can explicitly enable reasoning (for complex math/logic) and web search (for real-time data).
+```python
+import opendeep as genai
+
+genai.configure(api_key="your_userToken_here")
+model = genai.GenerativeModel("deepseek-v4-flash")
+
+# Web Search
+response = model.generate_content("What is the weather in Tokyo today?", search_enabled=True)
+print(response.text)
+
+# DeepThink (Streaming)
+response = model.generate_content("Solve 2 + 2 * 2", thinking_enabled=True, stream=True)
+```
+
+### 5. Asynchronous Client
+For FastAPI, Telegram bots, or Discord integrations, use the non-blocking Async client.
+```python
+import asyncio
+import opendeep as genai
+
+genai.configure(api_key="your_userToken_here")
+
+async def main():
+    model = genai.AsyncGenerativeModel("deepseek-v4-pro")
+    chat = model.start_chat()
+    
+    response = await chat.send_message("Write a short poem.", stream=False)
+    print(response.text)
+
+asyncio.run(main())
+```
 
 ## 🏗️ Architecture Under the Hood
 
