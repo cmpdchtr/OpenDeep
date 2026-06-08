@@ -75,7 +75,7 @@ class GenerativeModel:
             "parent_message_id": None,
             "prompt": prompt,
             "ref_file_ids": [],
-            "thinking_enabled": self.model_name == "deepseek-reasoner",
+            "thinking_enabled": self.model_name in ("deepseek-reasoner", "deepseek-v4-pro"),
             "search_enabled": False
         }
         
