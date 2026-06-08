@@ -23,9 +23,9 @@ class GenerateContentResponse:
 class GenerativeModel:
     """
     Interface for interacting with generative models.
-    Supports 'deepseek-chat' (V3) and 'deepseek-reasoner' (R1).
+    Supports 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-vision', 'deepseek-chat', and 'deepseek-reasoner'.
     """
-    def __init__(self, model_name: str = "deepseek-chat"):
+    def __init__(self, model_name: str = "deepseek-v4-pro"):
         self.model_name = model_name
         self.session = requests.Session(impersonate="chrome120") if HAS_CURL_CFFI else requests.Session()
         
@@ -56,37 +56,64 @@ class GenerativeModel:
             raise RuntimeError("Failed to extract chat session ID from the server response.")
         return session_id
 
-    def generate_content(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
+    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
+        """Starts a multi-turn chat session."""
+        return ChatSession(self, thinking_enabled, search_enabled)
+
+    def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> GenerateContentResponse:
         """
         Generates content based on the provided prompt.
         
         Args:
             prompt: The input text prompt for the model.
             stream: If True, streams the response chunks to standard output.
+            thinking_enabled: If True, enables the DeepThink reasoning process. If None, defaults to True for Pro models.
+            search_enabled: If True, enables Web Search (only supported by deepseek-v4-flash).
             
         Returns:
             A GenerateContentResponse containing the full generated text.
         """
-        chat_session_id = self._create_session()
+        chat = self.start_chat(thinking_enabled, search_enabled)
+        return chat.send_message(prompt, stream=stream)
+
+
+class ChatSession:
+    """Represents a multi-turn conversation with the model."""
+    def __init__(self, model: GenerativeModel, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
+        self.model = model
+        self.chat_session_id = self.model._create_session()
+        self.parent_message_id = None
         
+        if thinking_enabled is None:
+            self.thinking_enabled = self.model.model_name in ("deepseek-reasoner", "deepseek-v4-pro")
+        else:
+            self.thinking_enabled = thinking_enabled
+            
+        self.search_enabled = search_enabled if search_enabled is not None else False
+        
+        if self.search_enabled and self.model.model_name != "deepseek-v4-flash":
+            import warnings
+            warnings.warn("Search is only supported by the 'deepseek-v4-flash' (Instant) model.", UserWarning)
+
+    def send_message(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
         url = f"{config.base_url}/chat/completion"
         payload = {
-            "chat_session_id": chat_session_id,
-            "parent_message_id": None,
+            "chat_session_id": self.chat_session_id,
+            "parent_message_id": self.parent_message_id,
             "prompt": prompt,
             "ref_file_ids": [],
-            "thinking_enabled": self.model_name in ("deepseek-reasoner", "deepseek-v4-pro"),
-            "search_enabled": False
+            "thinking_enabled": self.thinking_enabled,
+            "search_enabled": self.search_enabled
         }
         
-        headers = self._get_headers()
+        headers = self.model._get_headers()
         
         # Attempt to resolve the Proof of Work (POW) challenge required by the API.
         try:
             from .pow import DeepSeekPOW
             pow_solver = DeepSeekPOW()
             
-            pow_resp = self.session.post(
+            pow_resp = self.model.session.post(
                 f"{config.base_url}/chat/create_pow_challenge",
                 headers=headers,
                 json={"target_path": "/api/v0/chat/completion"}
@@ -100,7 +127,7 @@ class GenerativeModel:
             import warnings
             warnings.warn(f"POW solver dependencies missing (wasmtime, numpy). Request might be rejected. Error: {e}", ImportWarning)
         
-        response = self.session.post(url, headers=headers, json=payload, stream=True)
+        response = self.model.session.post(url, headers=headers, json=payload, stream=True)
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
@@ -125,6 +152,12 @@ class GenerativeModel:
                         data = json.loads(raw_data)
                         content = ""
                         reasoning = ""
+                        
+                        # Capture message ID for multi-turn
+                        if "response_message_id" in data:
+                            self.parent_message_id = data["response_message_id"]
+                        elif "v" in data and isinstance(data["v"], dict) and "response" in data["v"] and "message_id" in data["v"]["response"]:
+                            self.parent_message_id = data["v"]["response"]["message_id"]
                         
                         # Handle legacy data format
                         if "choices" in data:
