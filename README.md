@@ -73,7 +73,23 @@ print(response.text)
 response = model.generate_content("Solve 2 + 2 * 2", thinking_enabled=True, stream=True)
 ```
 
-### 5. Asynchronous Client
+### 5. Vision Support (DeepSeek-Vision)
+Upload images and ask questions about them.
+```python
+import opendeep as genai
+
+genai.configure(api_key="your_userToken_here")
+model = genai.GenerativeModel("deepseek-vision")
+
+# 1. Upload the image
+file_id = model.upload_file("path/to/your/image.jpg")
+
+# 2. Ask a question about it
+response = model.generate_content("What is in this image?", file_ids=[file_id])
+print(response.text)
+```
+
+### 6. Asynchronous Client
 For FastAPI, Telegram bots, or Discord integrations, use the non-blocking Async client.
 ```python
 import asyncio

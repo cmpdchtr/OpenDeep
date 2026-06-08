@@ -56,11 +56,11 @@ class GenerativeModel:
             raise RuntimeError("Failed to extract chat session ID from the server response.")
         return session_id
 
-    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
+    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None):
         """Starts a multi-turn chat session."""
-        return ChatSession(self, thinking_enabled, search_enabled)
+        return ChatSession(self, thinking_enabled, search_enabled, file_ids)
 
-    def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> GenerateContentResponse:
+    def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None) -> GenerateContentResponse:
         """
         Generates content based on the provided prompt.
         
@@ -69,20 +69,77 @@ class GenerativeModel:
             stream: If True, streams the response chunks to standard output.
             thinking_enabled: If True, enables the DeepThink reasoning process. If None, defaults to True for Pro models.
             search_enabled: If True, enables Web Search (only supported by deepseek-v4-flash).
+            file_ids: Optional list of file IDs (from upload_file) to include in the prompt.
             
         Returns:
             A GenerateContentResponse containing the full generated text.
         """
-        chat = self.start_chat(thinking_enabled, search_enabled)
+        chat = self.start_chat(thinking_enabled, search_enabled, file_ids)
         return chat.send_message(prompt, stream=stream)
+
+    def upload_file(self, file_path: str) -> str:
+        """
+        Uploads a file to DeepSeek servers for use with vision models.
+        
+        Args:
+            file_path: Path to the file to upload.
+            
+        Returns:
+            The file ID string.
+        """
+        import os
+        from curl_cffi.curl import CurlMime
+        file_size = os.path.getsize(file_path)
+        file_name = os.path.basename(file_path)
+        content_type = 'image/jpeg' if file_path.lower().endswith(('.jpg', '.jpeg')) else 'application/octet-stream'
+        
+        headers = self._get_headers()
+        headers.update({
+            "x-model-type": "vision",
+            "x-file-size": str(file_size),
+        })
+        if "Content-Type" in headers:
+            del headers["Content-Type"]
+        
+        # POW for upload
+        try:
+            from .pow import DeepSeekPOW
+            pow_solver = DeepSeekPOW()
+            pow_resp = self.session.post(
+                f"{config.base_url}/chat/create_pow_challenge",
+                headers=self._get_headers(),
+                json={"target_path": "/api/v0/file/upload_file"}
+            )
+            if pow_resp.ok:
+                challenge_data = pow_resp.json().get('data', {}).get('biz_data', {}).get('challenge')
+                if challenge_data:
+                    headers['x-ds-pow-response'] = pow_solver.solve_challenge(challenge_data)
+        except ImportError:
+            pass
+            
+        mime = CurlMime()
+        mime.addpart(name="file", filename=file_name, content_type=content_type, local_path=file_path)
+        
+        response = self.session.post(
+            f"{config.base_url}/file/upload_file",
+            headers=headers,
+            multipart=mime
+        )
+            
+        response.raise_for_status()
+        file_id = response.json().get("data", {}).get("biz_data", {}).get("id")
+        if not file_id:
+            raise RuntimeError(f"Failed to get file ID from response: {response.text}")
+        return file_id
 
 
 class ChatSession:
     """Represents a multi-turn conversation with the model."""
-    def __init__(self, model: GenerativeModel, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
+    def __init__(self, model: GenerativeModel, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None):
         self.model = model
         self.chat_session_id = self.model._create_session()
         self.parent_message_id = None
+        self.file_ids = file_ids or []
         
         if thinking_enabled is None:
             self.thinking_enabled = self.model.model_name in ("deepseek-reasoner", "deepseek-v4-pro")
@@ -95,15 +152,18 @@ class ChatSession:
             import warnings
             warnings.warn("Search is only supported by the 'deepseek-v4-flash' (Instant) model.", UserWarning)
 
-    def send_message(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
+    def send_message(self, prompt: str, stream: bool = False, file_ids: Optional[list] = None) -> GenerateContentResponse:
         url = f"{config.base_url}/chat/completion"
+        current_file_ids = list(set(self.file_ids + (file_ids or [])))
+        
         payload = {
             "chat_session_id": self.chat_session_id,
             "parent_message_id": self.parent_message_id,
             "prompt": prompt,
-            "ref_file_ids": [],
+            "ref_file_ids": current_file_ids,
             "thinking_enabled": self.thinking_enabled,
-            "search_enabled": self.search_enabled
+            "search_enabled": self.search_enabled,
+            "model_class": self.model.model_name.replace("-", "_")
         }
         
         headers = self.model._get_headers()
@@ -196,10 +256,11 @@ class ChatSession:
 
 class AsyncChatSession:
     """Represents an asynchronous multi-turn conversation with the model."""
-    def __init__(self, model, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
+    def __init__(self, model, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None):
         self.model = model
         self.chat_session_id = None
         self.parent_message_id = None
+        self.file_ids = file_ids or []
         
         if thinking_enabled is None:
             self.thinking_enabled = self.model.model_name in ("deepseek-reasoner", "deepseek-v4-pro")
@@ -216,17 +277,20 @@ class AsyncChatSession:
         if not self.chat_session_id:
             self.chat_session_id = await self.model._create_session()
 
-    async def send_message(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
+    async def send_message(self, prompt: str, stream: bool = False, file_ids: Optional[list] = None) -> GenerateContentResponse:
         await self._init_session()
         
         url = f"{config.base_url}/chat/completion"
+        current_file_ids = list(set(self.file_ids + (file_ids or [])))
+        
         payload = {
             "chat_session_id": self.chat_session_id,
             "parent_message_id": self.parent_message_id,
             "prompt": prompt,
-            "ref_file_ids": [],
+            "ref_file_ids": current_file_ids,
             "thinking_enabled": self.thinking_enabled,
-            "search_enabled": self.search_enabled
+            "search_enabled": self.search_enabled,
+            "model_class": self.model.model_name.replace("-", "_")
         }
         
         headers = self.model._get_headers()
@@ -345,9 +409,52 @@ class AsyncGenerativeModel:
             raise RuntimeError("Failed to extract chat session ID.")
         return session_id
 
-    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> AsyncChatSession:
-        return AsyncChatSession(self, thinking_enabled, search_enabled)
+    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None) -> AsyncChatSession:
+        return AsyncChatSession(self, thinking_enabled, search_enabled, file_ids)
 
-    async def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> GenerateContentResponse:
-        chat = self.start_chat(thinking_enabled, search_enabled)
+    async def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None) -> GenerateContentResponse:
+        chat = self.start_chat(thinking_enabled, search_enabled, file_ids)
         return await chat.send_message(prompt, stream=stream)
+
+    async def upload_file(self, file_path: str) -> str:
+        """Uploads a file asynchronously."""
+        import os
+        from curl_cffi.curl import CurlMime
+        file_size = os.path.getsize(file_path)
+        file_name = os.path.basename(file_path)
+        content_type = 'image/jpeg' if file_path.lower().endswith(('.jpg', '.jpeg')) else 'application/octet-stream'
+        
+        headers = self._get_headers()
+        headers.update({
+            "x-model-type": "vision",
+            "x-file-size": str(file_size)
+        })
+        if "Content-Type" in headers:
+            del headers["Content-Type"]
+        
+        try:
+            from .pow import DeepSeekPOW
+            pow_solver = DeepSeekPOW()
+            pow_resp = await self.session.post(
+                f"{config.base_url}/chat/create_pow_challenge",
+                headers=self._get_headers(),
+                json={"target_path": "/api/v0/file/upload_file"}
+            )
+            if pow_resp.status_code == 200:
+                challenge_data = pow_resp.json().get('data', {}).get('biz_data', {}).get('challenge')
+                if challenge_data:
+                    headers['x-ds-pow-response'] = pow_solver.solve_challenge(challenge_data)
+        except ImportError:
+            pass
+            
+        mime = CurlMime()
+        mime.addpart(name="file", filename=file_name, content_type=content_type, local_path=file_path)
+        
+        response = await self.session.post(
+            f"{config.base_url}/file/upload_file",
+            headers=headers,
+            multipart=mime
+        )
+            
+        response.raise_for_status()
+        return response.json().get("data", {}).get("biz_data", {}).get("id")
