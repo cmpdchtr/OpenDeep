@@ -23,7 +23,7 @@ class GenerateContentResponse:
 class GenerativeModel:
     """
     Interface for interacting with generative models.
-    Supports 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-vision', 'deepseek-chat', and 'deepseek-reasoner'.
+    Supports 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-chat', and 'deepseek-reasoner'.
     """
     def __init__(self, model_name: str = "deepseek-v4-pro"):
         self.model_name = model_name
@@ -34,15 +34,23 @@ class GenerativeModel:
         if not config.api_key:
             raise ValueError("API key is not configured. Use opendeep.configure(api_key='your_token').")
             
-        return {
+        headers = {
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": config.user_agent,
             "Referer": "https://chat.deepseek.com/",
+            "Origin": "https://chat.deepseek.com",
+            "x-client-locale": "en_US",
+            "x-client-timezone-offset": "10800",
             "x-app-version": "20241129.1",
             "x-client-platform": "web"
         }
+        
+        if self.model_name == "deepseek-expert":
+            headers["x-client-version"] = "2.0.0"
+        
+        return headers
 
     def _create_session(self) -> str:
         """Initializes a new chat session on the DeepSeek servers."""
@@ -51,16 +59,17 @@ class GenerativeModel:
         response = self.session.post(url, headers=self._get_headers(), json=payload)
         response.raise_for_status()
         
-        session_id = response.json().get("data", {}).get("biz_data", {}).get("id")
+        biz_data = response.json().get("data", {}).get("biz_data", {})
+        session_id = biz_data.get("id") or biz_data.get("chat_session", {}).get("id")
         if not session_id:
-            raise RuntimeError("Failed to extract chat session ID from the server response.")
+            raise RuntimeError(f"Failed to extract chat session ID: {response.text}")
         return session_id
 
-    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None):
+    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
         """Starts a multi-turn chat session."""
-        return ChatSession(self, thinking_enabled, search_enabled, file_ids)
+        return ChatSession(self, thinking_enabled, search_enabled)
 
-    def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None) -> GenerateContentResponse:
+    def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> GenerateContentResponse:
         """
         Generates content based on the provided prompt.
         
@@ -69,77 +78,20 @@ class GenerativeModel:
             stream: If True, streams the response chunks to standard output.
             thinking_enabled: If True, enables the DeepThink reasoning process. If None, defaults to True for Pro models.
             search_enabled: If True, enables Web Search (only supported by deepseek-v4-flash).
-            file_ids: Optional list of file IDs (from upload_file) to include in the prompt.
             
         Returns:
             A GenerateContentResponse containing the full generated text.
         """
-        chat = self.start_chat(thinking_enabled, search_enabled, file_ids)
+        chat = self.start_chat(thinking_enabled, search_enabled)
         return chat.send_message(prompt, stream=stream)
-
-    def upload_file(self, file_path: str) -> str:
-        """
-        Uploads a file to DeepSeek servers for use with vision models.
-        
-        Args:
-            file_path: Path to the file to upload.
-            
-        Returns:
-            The file ID string.
-        """
-        import os
-        from curl_cffi.curl import CurlMime
-        file_size = os.path.getsize(file_path)
-        file_name = os.path.basename(file_path)
-        content_type = 'image/jpeg' if file_path.lower().endswith(('.jpg', '.jpeg')) else 'application/octet-stream'
-        
-        headers = self._get_headers()
-        headers.update({
-            "x-model-type": "vision",
-            "x-file-size": str(file_size),
-        })
-        if "Content-Type" in headers:
-            del headers["Content-Type"]
-        
-        # POW for upload
-        try:
-            from .pow import DeepSeekPOW
-            pow_solver = DeepSeekPOW()
-            pow_resp = self.session.post(
-                f"{config.base_url}/chat/create_pow_challenge",
-                headers=self._get_headers(),
-                json={"target_path": "/api/v0/file/upload_file"}
-            )
-            if pow_resp.ok:
-                challenge_data = pow_resp.json().get('data', {}).get('biz_data', {}).get('challenge')
-                if challenge_data:
-                    headers['x-ds-pow-response'] = pow_solver.solve_challenge(challenge_data)
-        except ImportError:
-            pass
-            
-        mime = CurlMime()
-        mime.addpart(name="file", filename=file_name, content_type=content_type, local_path=file_path)
-        
-        response = self.session.post(
-            f"{config.base_url}/file/upload_file",
-            headers=headers,
-            multipart=mime
-        )
-            
-        response.raise_for_status()
-        file_id = response.json().get("data", {}).get("biz_data", {}).get("id")
-        if not file_id:
-            raise RuntimeError(f"Failed to get file ID from response: {response.text}")
-        return file_id
 
 
 class ChatSession:
     """Represents a multi-turn conversation with the model."""
-    def __init__(self, model: GenerativeModel, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None):
+    def __init__(self, model: GenerativeModel, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
         self.model = model
         self.chat_session_id = self.model._create_session()
         self.parent_message_id = None
-        self.file_ids = file_ids or []
         
         if thinking_enabled is None:
             self.thinking_enabled = self.model.model_name in ("deepseek-reasoner", "deepseek-v4-pro")
@@ -152,18 +104,21 @@ class ChatSession:
             import warnings
             warnings.warn("Search is only supported by the 'deepseek-v4-flash' (Instant) model.", UserWarning)
 
-    def send_message(self, prompt: str, stream: bool = False, file_ids: Optional[list] = None) -> GenerateContentResponse:
+    def send_message(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
         url = f"{config.base_url}/chat/completion"
-        current_file_ids = list(set(self.file_ids + (file_ids or [])))
+        
+        model_type = "expert" if self.model.model_name == "deepseek-expert" else "default"
         
         payload = {
             "chat_session_id": self.chat_session_id,
             "parent_message_id": self.parent_message_id,
             "prompt": prompt,
-            "ref_file_ids": current_file_ids,
+            "ref_file_ids": [],
             "thinking_enabled": self.thinking_enabled,
             "search_enabled": self.search_enabled,
-            "model_class": self.model.model_name.replace("-", "_")
+            "action": None,
+            "preempt": False,
+            "model_type": model_type
         }
         
         headers = self.model._get_headers()
@@ -194,10 +149,15 @@ class ChatSession:
             raise requests.exceptions.HTTPError(f"{e} Response body: {response.text}") from None
             
         if 'text/event-stream' not in response.headers.get('Content-Type', ''):
-            raise RuntimeError(f"Unexpected Content-Type received: {response.headers.get('Content-Type')}. Body: {response.text[:500]}")
+            try:
+                error_body = response.content.decode('utf-8')
+            except Exception:
+                error_body = b"\\n".join([line for line in response.iter_lines()]).decode('utf-8', errors='ignore')
+            raise RuntimeError(f"Unexpected Content-Type received: {response.headers.get('Content-Type')}. Body: {error_body}")
         
         full_text = ""
         current_patch_target = "response/content"
+        current_fragment_type = "RESPONSE"
         
         for line in response.iter_lines():
             if line:
@@ -213,13 +173,11 @@ class ChatSession:
                         content = ""
                         reasoning = ""
                         
-                        # Capture message ID for multi-turn
                         if "response_message_id" in data:
                             self.parent_message_id = data["response_message_id"]
                         elif "v" in data and isinstance(data["v"], dict) and "response" in data["v"] and "message_id" in data["v"]["response"]:
                             self.parent_message_id = data["v"]["response"]["message_id"]
                         
-                        # Handle legacy data format
                         if "choices" in data:
                             choices = data.get("choices", [])
                             if choices:
@@ -227,17 +185,36 @@ class ChatSession:
                                 content = delta.get("content", "")
                                 reasoning = delta.get("reasoning_content", "")
                         
-                        # Handle newer patch-based data format
                         elif "v" in data:
                             if "p" in data:
                                 current_patch_target = data["p"]
-                                
+                            
                             val = data["v"]
-                            if isinstance(val, str):
-                                if current_patch_target == "response/content":
-                                    content = val
-                                elif current_patch_target == "response/thinking_content":
+                            
+                            if isinstance(val, dict) and "response" in val:
+                                fragments = val["response"].get("fragments", [])
+                                if fragments:
+                                    current_fragment_type = fragments[0].get("type", "RESPONSE")
+                                    if current_fragment_type == "THINK":
+                                        reasoning = fragments[0].get("content", "")
+                                    else:
+                                        content = fragments[0].get("content", "")
+                            elif isinstance(val, list) and current_patch_target == "response/fragments":
+                                for frag in val:
+                                    if isinstance(frag, dict):
+                                        frag_type = frag.get("type", "RESPONSE")
+                                        if frag_type == "THINK":
+                                            reasoning = frag.get("content", "")
+                                        else:
+                                            content = frag.get("content", "")
+                                        current_fragment_type = frag_type
+                            elif isinstance(val, str):
+                                if current_patch_target == "response/status":
+                                    continue
+                                if current_fragment_type == "THINK" or "thinking" in current_patch_target:
                                     reasoning = val
+                                else:
+                                    content = val
                         
                         if reasoning and stream:
                             print(f"\033[90m{reasoning}\033[0m", end="", flush=True)
@@ -256,11 +233,10 @@ class ChatSession:
 
 class AsyncChatSession:
     """Represents an asynchronous multi-turn conversation with the model."""
-    def __init__(self, model, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None):
+    def __init__(self, model, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None):
         self.model = model
         self.chat_session_id = None
         self.parent_message_id = None
-        self.file_ids = file_ids or []
         
         if thinking_enabled is None:
             self.thinking_enabled = self.model.model_name in ("deepseek-reasoner", "deepseek-v4-pro")
@@ -277,20 +253,23 @@ class AsyncChatSession:
         if not self.chat_session_id:
             self.chat_session_id = await self.model._create_session()
 
-    async def send_message(self, prompt: str, stream: bool = False, file_ids: Optional[list] = None) -> GenerateContentResponse:
+    async def send_message(self, prompt: str, stream: bool = False) -> GenerateContentResponse:
         await self._init_session()
         
         url = f"{config.base_url}/chat/completion"
-        current_file_ids = list(set(self.file_ids + (file_ids or [])))
+        
+        model_type = "expert" if self.model.model_name == "deepseek-expert" else "default"
         
         payload = {
             "chat_session_id": self.chat_session_id,
             "parent_message_id": self.parent_message_id,
             "prompt": prompt,
-            "ref_file_ids": current_file_ids,
+            "ref_file_ids": [],
             "thinking_enabled": self.thinking_enabled,
             "search_enabled": self.search_enabled,
-            "model_class": self.model.model_name.replace("-", "_")
+            "action": None,
+            "preempt": False,
+            "model_type": model_type
         }
         
         headers = self.model._get_headers()
@@ -317,10 +296,15 @@ class AsyncChatSession:
         response.raise_for_status()
             
         if 'text/event-stream' not in response.headers.get('Content-Type', ''):
-            raise RuntimeError(f"Unexpected Content-Type received: {response.headers.get('Content-Type')}")
+            try:
+                error_body = response.content.decode('utf-8')
+            except Exception:
+                error_body = b"\\n".join([line async for line in response.aiter_lines()]).decode('utf-8', errors='ignore')
+            raise RuntimeError(f"Unexpected Content-Type received: {response.headers.get('Content-Type')}. Body: {error_body}")
         
         full_text = ""
         current_patch_target = "response/content"
+        current_fragment_type = "RESPONSE"
         
         async for line in response.aiter_lines():
             if line:
@@ -350,13 +334,33 @@ class AsyncChatSession:
                         elif "v" in data:
                             if "p" in data:
                                 current_patch_target = data["p"]
-                                
+                            
                             val = data["v"]
-                            if isinstance(val, str):
-                                if current_patch_target == "response/content":
-                                    content = val
-                                elif current_patch_target == "response/thinking_content":
+                            
+                            if isinstance(val, dict) and "response" in val:
+                                fragments = val["response"].get("fragments", [])
+                                if fragments:
+                                    current_fragment_type = fragments[0].get("type", "RESPONSE")
+                                    if current_fragment_type == "THINK":
+                                        reasoning = fragments[0].get("content", "")
+                                    else:
+                                        content = fragments[0].get("content", "")
+                            elif isinstance(val, list) and current_patch_target == "response/fragments":
+                                for frag in val:
+                                    if isinstance(frag, dict):
+                                        frag_type = frag.get("type", "RESPONSE")
+                                        if frag_type == "THINK":
+                                            reasoning = frag.get("content", "")
+                                        else:
+                                            content = frag.get("content", "")
+                                        current_fragment_type = frag_type
+                            elif isinstance(val, str):
+                                if current_patch_target == "response/status":
+                                    continue
+                                if current_fragment_type == "THINK" or "thinking" in current_patch_target:
                                     reasoning = val
+                                else:
+                                    content = val
                         
                         if reasoning and stream:
                             print(f"\033[90m{reasoning}\033[0m", end="", flush=True)
@@ -376,7 +380,7 @@ class AsyncChatSession:
 class AsyncGenerativeModel:
     """
     Asynchronous interface for interacting with generative models.
-    Supports 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-vision', 'deepseek-chat', and 'deepseek-reasoner'.
+    Supports 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-chat', and 'deepseek-reasoner'.
     """
     def __init__(self, model_name: str = "deepseek-v4-pro"):
         self.model_name = model_name
@@ -388,73 +392,43 @@ class AsyncGenerativeModel:
     def _get_headers(self) -> Dict[str, str]:
         if not config.api_key:
             raise ValueError("API key is not configured.")
-        return {
+        headers = {
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": config.user_agent,
             "Referer": "https://chat.deepseek.com/",
+            "Origin": "https://chat.deepseek.com",
+            "x-client-locale": "en_US",
+            "x-client-timezone-offset": "10800",
             "x-app-version": "20241129.1",
             "x-client-platform": "web"
         }
+        
+        if self.model_name == "deepseek-expert":
+            headers["x-client-version"] = "2.0.0"
+        
+        return headers
 
     async def _create_session(self) -> str:
         url = f"{config.base_url}/chat_session/create"
         payload = {"character_id": None}
-        response = await self.session.post(url, headers=self._get_headers(), json=payload)
+        headers = self._get_headers()
+        headers["x-app-version"] = "20241129.1"
+        if "x-client-version" in headers:
+            del headers["x-client-version"]
+        response = await self.session.post(url, headers=headers, json=payload)
         response.raise_for_status()
         
-        session_id = response.json().get("data", {}).get("biz_data", {}).get("id")
+        biz_data = response.json().get("data", {}).get("biz_data", {})
+        session_id = biz_data.get("id") or biz_data.get("chat_session", {}).get("id")
         if not session_id:
             raise RuntimeError("Failed to extract chat session ID.")
         return session_id
 
-    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None) -> AsyncChatSession:
-        return AsyncChatSession(self, thinking_enabled, search_enabled, file_ids)
+    def start_chat(self, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> AsyncChatSession:
+        return AsyncChatSession(self, thinking_enabled, search_enabled)
 
-    async def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None, file_ids: Optional[list] = None) -> GenerateContentResponse:
-        chat = self.start_chat(thinking_enabled, search_enabled, file_ids)
+    async def generate_content(self, prompt: str, stream: bool = False, thinking_enabled: Optional[bool] = None, search_enabled: Optional[bool] = None) -> GenerateContentResponse:
+        chat = self.start_chat(thinking_enabled, search_enabled)
         return await chat.send_message(prompt, stream=stream)
-
-    async def upload_file(self, file_path: str) -> str:
-        """Uploads a file asynchronously."""
-        import os
-        from curl_cffi.curl import CurlMime
-        file_size = os.path.getsize(file_path)
-        file_name = os.path.basename(file_path)
-        content_type = 'image/jpeg' if file_path.lower().endswith(('.jpg', '.jpeg')) else 'application/octet-stream'
-        
-        headers = self._get_headers()
-        headers.update({
-            "x-model-type": "vision",
-            "x-file-size": str(file_size)
-        })
-        if "Content-Type" in headers:
-            del headers["Content-Type"]
-        
-        try:
-            from .pow import DeepSeekPOW
-            pow_solver = DeepSeekPOW()
-            pow_resp = await self.session.post(
-                f"{config.base_url}/chat/create_pow_challenge",
-                headers=self._get_headers(),
-                json={"target_path": "/api/v0/file/upload_file"}
-            )
-            if pow_resp.status_code == 200:
-                challenge_data = pow_resp.json().get('data', {}).get('biz_data', {}).get('challenge')
-                if challenge_data:
-                    headers['x-ds-pow-response'] = pow_solver.solve_challenge(challenge_data)
-        except ImportError:
-            pass
-            
-        mime = CurlMime()
-        mime.addpart(name="file", filename=file_name, content_type=content_type, local_path=file_path)
-        
-        response = await self.session.post(
-            f"{config.base_url}/file/upload_file",
-            headers=headers,
-            multipart=mime
-        )
-            
-        response.raise_for_status()
-        return response.json().get("data", {}).get("biz_data", {}).get("id")

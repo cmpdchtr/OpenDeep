@@ -1,28 +1,30 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "opendeep"
-version = "0.2.0"
-authors = [
-  { name="cmpdchtr", email="cmpdchtr@gmail.com" },
-]
-description = "A free, unofficial client for the DeepSeek API with a Google Gemini-like syntax."
+version = "0.9.0"
+description = "A lightweight, unofficial Python library for free DeepSeek API access."
 readme = "README.md"
-requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
+requires-python = ">=3.10"
 dependencies = [
-    "requests",
-    "curl_cffi",
-    "wasmtime",
-    "numpy"
+    "curl_cffi>=0.7.0",
+    "requests>=2.31.0",
+    "wasmtime>=18.0.0",
+    "numpy>=1.26.0",
 ]
 
-[project.urls]
-"Homepage" = "https://github.com/cmpdchtr/OpenDeep"
-"Bug Tracker" = "https://github.com/cmpdchtr/OpenDeep/issues"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pyright]
+typeCheckingMode = "strict"
+include = ["opendeep"]
+reportUnusedClass = "none"
+reportUnusedFunction = "none"
+reportPrivateUsage = "none"
+reportUnnecessaryIsInstance = "none"
+reportAttributeAccessIssue = "none"
+reportUnknownMemberType = "none"
