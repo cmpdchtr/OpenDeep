@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.9.0-orange.svg)](https://github.com/yourusername/opendeep)
+[![Version](https://img.shields.io/badge/Version-0.9.0-orange.svg)](https://github.com/cmpdchtr/opendeep)
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 **Access DeepSeek's powerful AI models with a clean, Pythonic interface — no official API key required.**
@@ -75,7 +75,7 @@ This installs `curl_cffi` which provides TLS fingerprinting to bypass Cloudflare
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/opendeep.git
+git clone https://github.com/cmpdchtr/opendeep.git
 cd opendeep
 pip install -e .
 ```
@@ -498,7 +498,7 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/opendeep.git
+git clone https://github.com/cmpdchtr/opendeep.git
 cd opendeep
 
 # Create virtual environment
@@ -555,6 +555,6 @@ This is an **unofficial** library and is not affiliated with, endorsed by, or su
 
 **made with hate to corps by @cmpdchtr**
 
-[Report Bug](https://github.com/yourusername/opendeep/issues) • [Request Feature](https://github.com/yourusername/opendeep/issues)
+[Report Bug](https://github.com/cmpdchtr/opendeep/issues) • [Request Feature](https://github.com/cmpdchtr/opendeep/issues)
 
 </div>
